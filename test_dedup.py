@@ -170,6 +170,25 @@ def test_unicode_and_pathological_input():
     print("PASS CJK/emoji/punctuation/huge/empty inputs behave, no crash")
 
 
+def test_symbol_only_items_are_not_all_collapsed():
+    """0.1.1 bug: any string that normalizes to empty (emoji-only, symbol-only,
+    punctuation-only) had an empty feature set, so _overlap read 1.0 against
+    EVERY other such string and they all collapsed into one. A five-star and a
+    one-star rating, a rocket and a heart, are distinct content."""
+    items = ["\U0001f600\U0001f600", "❤❤", "\U0001f525",
+             "★★★★★", "★☆☆☆☆"]
+    kept, report = dedupe(items)
+    assert len(kept) == len(items), (
+        "SILENT DATA LOSS: distinct symbol-only items collapsed -> %r" % (kept,))
+    # byte-identical symbol-only strings must still collapse
+    kept, _ = dedupe(["\U0001f525\U0001f525", "\U0001f525\U0001f525"])
+    assert len(kept) == 1, "identical emoji should still collapse"
+    # empty strings still collapse together, real content kept
+    kept, _ = dedupe(["", "", "real content here"])
+    assert len(kept) == 2
+    print("PASS distinct symbol/emoji-only items survive; identical ones still collapse")
+
+
 def _verified_dup(a: str, b: str) -> bool:
     from arcaeon_dedup import _overlap
     return _overlap(a, b) >= 0.95
@@ -184,4 +203,5 @@ if __name__ == "__main__":
     test_k_zero_no_longer_collapses_everything()
     test_keep_longest_respects_the_documented_contract()
     test_unicode_and_pathological_input()
-    print(chr(10) + "ALL 8 TESTS PASSED")
+    test_symbol_only_items_are_not_all_collapsed()
+    print(chr(10) + "ALL 9 TESTS PASSED")

@@ -49,7 +49,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __all__ = ["dedupe", "simhash", "hamming", "DedupeReport"]
 
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -101,6 +101,14 @@ def _overlap(x: str, y: str) -> float:
     disjoint bigrams).
     """
     nx, ny = _normalize(x), _normalize(y)
+    if not nx and not ny:
+        # Both are content-empty after normalization (emoji-only, symbol-only,
+        # punctuation-only — a 5-star vs 1-star rating, a rocket vs a heart).
+        # Their feature sets are both empty, so every Jaccard below reads 1.0
+        # and they would ALL collapse into one. With no word content to compare,
+        # the only defensible "duplicate" is a byte-identical original; anything
+        # else is distinct content we cannot tell apart, so we must keep it.
+        return 1.0 if x == y else 0.0
     score = _jaccard(_char_grams(nx), _char_grams(ny))
     bx, by = _word_bigrams(nx), _word_bigrams(ny)
     if bx or by:

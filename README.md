@@ -83,4 +83,14 @@ repeat. No threshold fixes this in general — it is the same theorem as above. 
 one-token inversions are load-bearing in your corpus (medical, legal, financial
 records), pass `min_overlap=1.0` and drop only exact matches.
 
+**Collapse is order-dependent by design.** Items are clustered greedily against
+the first representative they match (single-linkage). If A matches B and B
+matches C but A does **not** match C, then feeding `[A, B, C]` keeps A and C
+while `[B, A, C]` collapses both into B — the *same* set of inputs yields a
+different survivor count depending on order. Every drop is still verified
+against the representative it was dropped for, so no item is removed against
+something it wasn't measured against; but if your pipeline merges retrievers in
+arbitrary order and you need order-stable output, sort the input first or run at
+`min_overlap=1.0`.
+
 MIT. Built by [Arcaeon](https://arcaeon.io) — the evidence layer for AI.

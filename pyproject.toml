@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arcaeon-dedup"
-version = "0.1.1"
+version = "0.1.2"
 description = "Strip near-duplicate text from an agent's context before it costs tokens. Pure stdlib, no LLM."
 readme = "README.md"
 requires-python = ">=3.9"

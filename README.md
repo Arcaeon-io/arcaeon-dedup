@@ -1,6 +1,6 @@
 # arcaeon-dedup
 
-**Strip near-duplicate text from an agent's context before it costs you tokens.**
+**Strip repeated text from an agent's context before it costs you tokens.**
 *Pure stdlib. No LLM, no embeddings, no network. Cheap enough to run on every call.*
 
 ```bash
@@ -10,60 +10,77 @@ pip install arcaeon-dedup
 ## Why
 
 Retrieved chunks, tool outputs, conversation history, and memory stores fill up with
-near-duplicates — the same passage phrased three ways, the same doc pulled twice,
-boilerplate repeated across results. Every redundant copy is pure token waste, and
-you pay for it on **every** call that carries it.
+literal repeats — the same doc pulled twice by two retrievers, the same boilerplate
+header on every result, a chunk that overlaps its neighbour, the same error line
+logged forty times. Every redundant copy is pure token waste, and you pay for it on
+**every** call that carries it.
 
 Most "dedup" tooling is built for training corpora, or needs embeddings + a vector DB
 to run. For agent context you want something that costs essentially nothing, so you
 can put it in front of every context assembly without thinking about it.
 
-`arcaeon-dedup` uses **SimHash** — a locality-sensitive hash, so *almost the same*
-collapses, not just byte-identical — over pure Python. No model call, no API, no
-dependencies.
+`arcaeon-dedup` uses **SimHash** to find candidate pairs fast, then **verifies every
+candidate by direct feature overlap** before it drops anything. The verification step
+is the whole safety story — see below for why a bare similarity threshold is not one.
 
 ## Use
 
 ```python
 from arcaeon_dedup import dedupe
 
+doc = "Docs: the API returns 200 on success. See the reference for details."
 chunks = [
-    "The API returned status 200 and the user was created successfully.",
-    "Status 200 was returned by the API; the user was created successfully.",  # near-dup
+    doc,
+    doc.replace(". ", ".  "),      # same doc, refetched — whitespace noise only
     "The database connection timed out after 30 seconds.",
 ]
 
 kept, report = dedupe(chunks)
-# kept   -> 2 items (the near-duplicate dropped, order preserved)
-# report -> deduped: kept 2, removed 1 near-duplicate(s); ~70 chars / ~17 tokens saved
+# kept   -> 2 items (the repeat dropped, order preserved)
+# report -> deduped: kept 2, removed 1 repeat(s); ~69 chars / ~17 tokens saved
 ```
 
 Tuning:
 
 ```python
-dedupe(chunks, max_hamming=12, k=1, keep="first")
+dedupe(chunks, min_overlap=0.95, max_hamming=12, k=1, keep="first")
 ```
 
-- `max_hamming` (default **12**, of 64 bits): how close counts as "duplicate."
-  Defaults are calibrated so reordered/lightly-reworded paraphrases (~10-12 bits
-  apart) collapse while genuinely different text (~30+ bits apart) is left alone —
-  a wide, safe margin. Lower = stricter.
-- `k` (default **1**): shingle size. `k=1` is order-insensitive (a bag-of-words
-  fingerprint — good for paraphrase); `k=2-3` weights word order (only closer-to-
-  verbatim dupes).
+- `min_overlap` (default **0.95**): the verification gate. A candidate pair is only
+  dropped if its measured feature overlap — the *minimum* of character-4-gram and
+  word-bigram Jaccard, after normalizing case, punctuation, and whitespace — is at
+  least this. `1.0` drops only exact matches after normalization. Below ~0.7 you are
+  deleting content that is merely *related*, which is silent data loss.
+- `max_hamming` (default **12**, of 64 bits): how wide the *candidate* net is thrown.
+  Raising it finds more candidates to verify; it does **not** weaken the gate above.
+- `k` (default **1**): SimHash shingle size, candidate generation only.
 - `keep`: `"first"` keeps the earliest of each cluster (best for chronological
-  context — the original stays); `"longest"` keeps the fullest phrasing.
+  context — the original stays); `"longest"` keeps the fullest phrasing. Clusters are
+  formed against fixed representatives, so nothing is ever dropped against an item it
+  wasn't verified against.
 
 Also exported: `simhash(text)`, `hamming(a, b)` if you want the primitives directly.
 
-## What it is / isn't
+## What it removes / what it will not
 
-**Is:** a fast, dependency-free near-duplicate filter for the text you're about to
-put in a context window — retrieval results, tool outputs, message history, memories.
+**Removes:** near-verbatim repeats. Identical text; text differing only in whitespace,
+case, punctuation, or wrapper noise; the same passage retrieved twice. That is the
+common and expensive case, and it is the one this can do safely.
 
-**Isn't:** a semantic clusterer or a summarizer. It removes *redundant copies*, not
-*related-but-distinct* content, and it won't rewrite anything. For paraphrase far from
-the original, raise `max_hamming` (accepting more false-positives) or reach for an
-embedding-based tool — this one is deliberately the cheap, safe, zero-dep first pass.
+**Will not: collapse paraphrase — and it must not pretend to.** No lexical distance
+separates "reworded, same meaning" from "one word changed, opposite meaning."
+`Charge the customer $19` and `Refund the customer $19` are lexically **closer** than
+any two honest paraphrases of the same sentence. So are `Alice owes Bob $100` and
+`Bob owes Alice $100` — identical bag of words, opposite fact. Any setting aggressive
+enough to collapse a paraphrase deletes those too, and deleting those is deleting
+facts out of an agent's context with a report that says it saved you tokens. If you
+need paraphrase collapsed, that requires semantics: use embeddings.
+
+**The one thing it can still get wrong**, stated plainly rather than left for you to
+find: a single inserted or substituted token inside a **long** document leaves the two
+strings overwhelmingly identical, so past some length a one-word change reads as a
+repeat. No threshold fixes this in general — it is the same theorem as above. If
+one-token inversions are load-bearing in your corpus (medical, legal, financial
+records), pass `min_overlap=1.0` and drop only exact matches.
 
 MIT. Built by [Arcaeon](https://arcaeon.io) — the evidence layer for AI.

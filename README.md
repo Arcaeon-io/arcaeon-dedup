@@ -35,7 +35,7 @@ chunks = [
 
 kept, report = dedupe(chunks)
 # kept   -> 2 items (the near-duplicate dropped, order preserved)
-# report -> deduped: kept 2, removed 1 near-duplicate(s); ~62 chars / ~15 tokens saved
+# report -> deduped: kept 2, removed 1 near-duplicate(s); ~70 chars / ~17 tokens saved
 ```
 
 Tuning:

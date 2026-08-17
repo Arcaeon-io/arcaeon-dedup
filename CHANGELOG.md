@@ -1,5 +1,67 @@
 # Changelog — arcaeon-dedup
 
+## 0.1.3 — 2026-08-16
+
+Hypothesis property-test pass, same night as `arcaeon-continuity`,
+`arcaeon-ledger`, and `arcaeon-distill` (ledger found a real `splitlines()`-vs-
+`ensure_ascii=False` false-mismatch bug on the U+0085/U+2028/U+2029
+unicode-line-separator class). **Verdict for this package: that bug class is
+STRUCTURALLY ABSENT.** `arcaeon_dedup` has zero file I/O anywhere in the
+package (`grep -n "open(\|jsonl\|splitlines\|readlines"` returns nothing) —
+it is a pure function over an in-memory `list[str]`, so there is no
+write-then-read-back path for that bug to live in. New property tests
+(`test_hypothesis_dedup.py`, 32 tests) confirm the class is at least handled
+without crashing and deterministically wherever it does reach the package
+(`_normalize`, `simhash`, `dedupe`).
+
+One real bug turned up and was fixed:
+
+- **Fixed (H-dedup-1) — `_normalize` used `.lower()`, not `.casefold()`, so
+  German eszett case variants were never even considered as duplicates.**
+  `"straße".lower()` stays `"straße"`, but `"STRASSE".lower()` is `"strasse"`
+  — different word tokens, so `dedupe(["die straße", "DIE STRASSE"])` kept
+  both, contradicting the package's own documented claim that content
+  "differing only in ... case ... collapse[s]." Found by
+  `test_whitespace_case_punctuation_variant_always_collapses`. Fixed by
+  switching to `str.casefold()`, the Unicode-standard case-insensitive
+  comparison primitive (`"ß".casefold() == "SS".casefold() == "ss"`); for
+  plain ASCII text this is identical to `.lower()`, so nothing else changes
+  (confirmed: existing 9-test suite unchanged; see the full test count below).
+  Regression pin: `test_eszett_case_variant_now_collapses_h_dedup_1`.
+
+- **Investigated, NOT a bug — Turkish dotless-ı (U+0131) still doesn't
+  unify with "I"/"i".** Same property test also found
+  `dedupe(["ıstanbul", "ISTANBUL"])` keeps both. Root cause: Turkish casing
+  is locale-DEPENDENT (`ı<->I`, `i<->İ`), and Python's `str.upper/lower/
+  casefold` implement only the locale-independent default tables, where
+  `"ı".upper() == "I"` but `"I".casefold() == "i" != "ı".casefold() == "ı"`.
+  A real fix needs a Turkish-aware casing table (e.g. PyICU), which
+  contradicts this package's zero-dependency, pure-stdlib design point —
+  left as an accepted, documented boundary, not chased. Pinned by
+  `test_turkish_dotless_i_is_accepted_out_of_scope` so a future run reads it
+  as known, not rediscovers it as a surprise.
+
+Also added, from the same mutation-testing pass, five regression tests that
+caught surviving mutants without finding a live bug: `_overlap`'s combining
+rule really is a `min` (AND-gate) not a `max` (OR-gate) between the
+char-gram and word-bigram views; `_jaccard(set(), set())`'s documented
+"both empty = identical" contract is pinned even though every current caller
+already guards around it; `keep="longest"`'s tie-break really does prefer
+the earliest occurrence, not the latest, when candidates are equal length;
+`simhash`'s bit-decision rule is strictly `> 0` (an exact-zero vote sum
+stays unset, not `>= 0`); and the SimHash candidate gate's own boundary
+(`hamming == max_hamming`, admitted, not excluded) holds on a real pair
+engineered to land exactly on it.
+
+**Fixed — test_dedup.py's `sys.path.insert` used a hardcoded absolute path**
+(`C:/Users/USER/arcaeon-dedup`), so the suite only ran correctly from that
+exact machine/checkout. Switched to
+`sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))`, which
+resolves relative to the test file itself — portable to any checkout path.
+
+Test count: **9 → 46 passed** (14 in `test_dedup.py` + 32 in
+`test_hypothesis_dedup.py`; all pre-existing tests still pass unmodified).
+
 ## 0.1.2 — unreleased (local, pending the 2 PM 2026-08-15 publish batch — NOT yet on PyPI)
 
 Emoji/symbol-collapse fix, found while writing the order-dependence note below.

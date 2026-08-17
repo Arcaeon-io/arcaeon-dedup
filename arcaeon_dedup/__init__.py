@@ -49,7 +49,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 __all__ = ["dedupe", "simhash", "hamming", "DedupeReport"]
 
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -59,13 +59,25 @@ _CHAR_GRAM = 4
 
 
 def _normalize(text: str) -> str:
-    """Word characters only, NFKC-folded, lowercased, single-spaced.
+    """Word characters only, NFKC-folded, casefolded, single-spaced.
 
     Punctuation, emoji, and whitespace runs are noise for repeat detection;
     NFKC folds the compatibility forms so a full-width or decomposed copy of
     the same sentence isn't read as different text.
+
+    Uses `str.casefold()`, not `str.lower()` (H-dedup-1, 2026-08-16, found by
+    property testing): `.lower()` does not round-trip German eszett -- "ß"
+    stays "ß" but "SS".lower() is "ss", so "straße" and "STRASSE" (an
+    ordinary all-caps case variant of the same word) normalized to DIFFERENT
+    word tokens and were never even considered as duplicate candidates,
+    contradicting this package's own documented "differing only in ... case
+    ... collapse" claim. `casefold()` is the Unicode-standard case-INsensitive
+    comparison primitive (TR21) built for exactly this
+    (`"ß".casefold() == "SS".casefold() == "ss"`); for plain ASCII text it is
+    identical to `.lower()`, so this changes nothing for the common case and
+    only strictly widens what counts as a case-variant match.
     """
-    return " ".join(_WORD.findall(unicodedata.normalize("NFKC", text).lower()))
+    return " ".join(_WORD.findall(unicodedata.normalize("NFKC", text).casefold()))
 
 
 def _char_grams(norm: str) -> set:

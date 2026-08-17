@@ -5,8 +5,9 @@ deleted 99.7% of distinct 20-word inputs.
 
 Run: python test_dedup.py
 """
+import os
 import sys
-sys.path.insert(0, r"C:/Users/USER/arcaeon-dedup")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arcaeon_dedup import dedupe, simhash, hamming
 
 
@@ -194,6 +195,182 @@ def _verified_dup(a: str, b: str) -> bool:
     return _overlap(a, b) >= 0.95
 
 
+def test_overlap_gate_is_min_not_max_the_and_not_the_or():
+    """Mutation-testing find (2026-08-16): `_overlap`'s combining rule is
+    `score = min(char_gram_jaccard, word_bigram_jaccard)` -- a pair must look
+    like a repeat under BOTH views to collapse. A `min` -> `max` mutant
+    SURVIVED the whole suite: nothing in MUST_SURVIVE actually needs the AND
+    gate to be an AND, because their char-gram scores are already too low on
+    their own. This pair is built so the gate is the ONLY thing standing
+    between "kept" and "silently merged": swapping two same-length words
+    ("cat"/"mat") deep inside a long shared sentence barely disturbs the
+    character stream (char-gram Jaccard == 1.0 -- a SET of substrings, so
+    reordering two equal-length tokens changes nothing) but scrambles word
+    order enough to drop word-bigram Jaccard to ~0.87, under the default
+    0.95 threshold. Correct code: min(1.0, 0.87) = 0.87 -> kept distinct.
+    A `max` mutant: max(1.0, 0.87) = 1.0 -> wrongly merged, silent data loss
+    on two sentences that report DIFFERENT facts (the cat on the mat is not
+    the mat on the cat)."""
+    pad = ("according to the quarterly compliance audit report filed this "
+           "morning by the operations team ")
+    x = pad + "the cat sat on the mat while everyone in the room quietly watched and waited patiently"
+    y = pad + "the mat sat on the cat while everyone in the room quietly watched and waited patiently"
+    kept, report = dedupe([x, y])
+    assert len(kept) == 2, (
+        "SILENT DATA LOSS (overlap-gate): %r and %r report different facts "
+        "and one was deleted -- the char/word-bigram AND gate did not hold"
+        % (x, y))
+    assert report.removed == 0
+    print("PASS the char-gram/word-bigram overlap gate is a real AND (min), "
+          "not a false OR (max): a word-order swap with char-gram==1.0 still "
+          "keeps both sentences distinct")
+
+
+def test_jaccard_both_empty_sets_are_identical_by_contract():
+    """Mutation-testing find (2026-08-16): `_jaccard`'s own both-empty guard
+    (`if not a and not b: return 1.0`) is UNREACHABLE through every current
+    caller in the module -- `_overlap` pre-filters the fully-empty-after-
+    normalize case before ever calling `_jaccard`, and the word-bigram call
+    site is itself guarded by `if bx or by`. A mutant that flips this
+    return to 0.0 SURVIVED the entire suite because nothing calls `_jaccard`
+    directly. Pinned here as a direct contract test of the documented
+    behavior ("1.0 = identical after normalization") so the branch has a
+    reader even though today it is dead code reached from no live path --
+    and so a future caller that removes one of the two upstream guards
+    inherits a tested invariant instead of a silent wrong answer."""
+    from arcaeon_dedup import _jaccard
+    assert _jaccard(set(), set()) == 1.0, (
+        "two empty feature sets must be reported as identical (1.0), not distinct")
+    assert _jaccard({"a"}, set()) == 0.0, "one empty, one non-empty must be 0.0 (unaffected control case)"
+    print("PASS _jaccard(set(), set()) == 1.0 by contract (dead-code branch, now pinned)")
+
+
+def test_keep_longest_tiebreak_prefers_earliest_on_length_tie():
+    """Mutation-testing find (2026-08-16): `keep='longest'` picks
+    `max(group, key=lambda i: (len(items[i]), -i))` -- when lengths tie, the
+    `-i` term prefers the EARLIEST occurrence (largest -i == smallest i). A
+    mutant that drops the negation (`i` instead of `-i`) SURVIVED: no
+    existing test put 3+ equal-length near-duplicates in one cluster under
+    keep='longest'. Three same-length variants (only a trailing V1/V2/V3
+    token differs) built with a shared min_overlap=0.9 threshold so they
+    verifiably cluster into one group; correct code keeps the FIRST
+    (index 0, 'V1'), the negation-dropped mutant keeps the LAST ('V3') --
+    silently changing which near-duplicate the caller gets back."""
+    base = ("incident resolved successfully at zero four hundred hours today "
+            "during the morning shift after the operations team completed a "
+            "full diagnostic sweep of every affected node in the cluster ")
+    s0, s1, s2 = base + "v1", base + "v2", base + "v3"
+    assert len(s0) == len(s1) == len(s2), "fixture drifted: variants must tie on length"
+    kept, report = dedupe([s0, s1, s2], keep="longest", min_overlap=0.9)
+    assert len(kept) == 1, "fixture drifted: the three variants no longer cluster into one"
+    assert kept[0] == s0, (
+        "keep='longest' with a length tie kept %r, expected the EARLIEST "
+        "occurrence %r" % (kept[0], s0))
+    print("PASS keep='longest' breaks a length tie toward the earliest occurrence")
+
+
+def test_simhash_bit_polarity_strict_positive_not_non_negative():
+    """Mutation-testing find (2026-08-16): `simhash`'s bit-decision rule is
+    `out |= (1 << i) if v[i] > 0` -- strictly positive, so a bit whose signed
+    shingle-vote sum lands exactly on zero stays UNSET. A `> 0` -> `>= 0`
+    mutant SURVIVED the whole suite because no existing case forces any
+    vote sum to land exactly on zero.
+
+    `_shingles("hotel bravo", k=1)` yields exactly two single-word shingles,
+    `["hotel", "bravo"]`. At bit index 4 their blake2b feature hashes
+    disagree (one contributes +1, the other -1), summing to precisely 0 --
+    the only value a two-term +/-1 sum can take besides +/-2. Correct code:
+    `0 > 0` is False -> bit 4 stays unset. Mutant: `0 >= 0` is True -> bit 4
+    gets set, producing a different 64-bit fingerprint for identical
+    reasons a >=/> boundary bug always produces a different fingerprint:
+    silently, on the one case no hand-written pair happens to hit."""
+    from arcaeon_dedup import _shingles, _feature_hash
+    text, k, bit = "hotel bravo", 1, 4
+    shingles = _shingles(text, k)
+    assert shingles == ["hotel", "bravo"], "fixture drifted: shingle set changed"
+    votes = sum(1 if (_feature_hash(sh) >> bit) & 1 else -1 for sh in shingles)
+    assert votes == 0, (
+        "fixture drifted: bit %d no longer nets to an exact zero vote (%d)"
+        % (bit, votes))
+    fp = simhash(text, k)
+    assert (fp >> bit) & 1 == 0, (
+        "bit %d is SET despite a zero vote sum -- simhash's polarity rule "
+        "is no longer strictly '> 0'" % bit)
+    print("PASS simhash bit-decision is strict '> 0': an exact-zero vote "
+          "sum stays unset")
+
+
+# --- E3 fixture: a hamming==max_hamming==12 candidate-gate boundary pair ---
+#
+# Built, not hand-written: a long filler document (2600 unique tokens, so
+# word-bigram Jaccard tolerates a lot of edits) with a 4-word phrase
+# inserted 61 times. Substituting the SAME word in 60 of the 61 occurrences
+# (deliberately leaving exactly one intact) means the two bigrams that word
+# touches are never actually removed from the document's bigram SET -- only
+# new bigrams get added to the union -- which keeps `_overlap` right at the
+# 0.95 edge even after 60 edits. The specific 60 replacement tokens below
+# were found by brute-force search (a few thousand trials) to land the
+# resulting SimHash distance at exactly 12, the default `max_hamming`.
+_E3_N_FILLER = 2600
+_E3_SNIPPET = ["please", "target", "the", "summary"]
+_E3_K = 61
+_E3_REPL = [
+    "bkqy", "bjdp", "bjpj", "bkth", "bjvb", "bjfg", "bbcg", "bhwq", "bktc",
+    "bjkx", "bdmb", "bgdp", "bfcm", "bcqv", "blmz", "bcbc", "bfzj", "bjlq",
+    "bhmj", "bgwb", "bkcw", "bjkx", "bbyd", "blwd", "bhjy", "blwd", "bbjy",
+    "bccd", "bfzj", "bdfb", "bgxm", "bgck", "bktc", "bkth", "bjmp", "bkft",
+    "bbrf", "bgbt", "blmq", "blmq", "bdkx", "bhmd", "bfpn", "bgbt", "bktc",
+    "bbdz", "bjvy", "bhmj", "bfcm", "bhmd", "bhvp", "bgrh", "bkrd", "blyw",
+    "bbyd", "bcwn", "bgbz", "bjpj", "bdrd", "bkhg",
+]
+
+
+def _e3_build_pair():
+    filler = ["f%d" % i for i in range(_E3_N_FILLER)]
+    words = list(filler)
+    step = max(1, len(words) // (_E3_K + 1))
+    positions = [min(len(words), step * (i + 1)) for i in range(_E3_K)]
+    for pos in sorted(positions, reverse=True):
+        words[pos:pos] = list(_E3_SNIPPET)
+    n = len(_E3_SNIPPET)
+    starts = [i for i in range(len(words) - n + 1) if words[i:i + n] == _E3_SNIPPET]
+    target_positions = [s + 1 for s in starts][:_E3_K - 1]  # leave one intact
+    assert len(target_positions) == len(_E3_REPL) == 60, "fixture drifted"
+    a = " ".join(words)
+    words_b = list(words)
+    for pos, r in zip(target_positions, _E3_REPL):
+        words_b[pos] = r
+    b = " ".join(words_b)
+    return a, b
+
+
+def test_clustering_candidate_gate_boundary_hamming_equals_max_hamming():
+    """Mutation-testing find (2026-08-16): the clustering candidate gate is
+    `hamming(fps[i], fps[rep]) <= max_hamming` -- inclusive, so a pair whose
+    SimHash fingerprints differ by EXACTLY `max_hamming` bits (12, the
+    default) is still admitted as a candidate, subject to `_overlap`'s
+    separate verification. A `<=` -> `<` mutant SURVIVED the whole suite
+    because no existing pair pins the boundary at hamming == 12 precisely --
+    hitting that exactly (out of 64 bits) while also keeping `_overlap` at
+    or above the 0.95 verification threshold is a search problem, not
+    something hand-constructible. See `_e3_build_pair` above for how the
+    fixture pair was built and found."""
+    from arcaeon_dedup import _overlap
+    a, b = _e3_build_pair()
+    ov = _overlap(a, b)
+    h = hamming(simhash(a, 1), simhash(b, 1))
+    assert h == 12, "fixture drifted: SimHash distance is no longer exactly 12 (got %d)" % h
+    assert ov >= 0.95, "fixture drifted: overlap dropped below the verification gate (%r)" % ov
+
+    kept, report = dedupe([a, b])  # default max_hamming=12, k=1, min_overlap=0.95
+    assert len(kept) == 1, "a pair at hamming == max_hamming must still be a candidate"
+    assert report.removed == 1
+
+    kept11, _ = dedupe([a, b], max_hamming=11)
+    assert len(kept11) == 2, "one bit tighter (max_hamming=11) must NOT admit this pair"
+    print("PASS clustering candidate gate is <= (inclusive) at hamming==max_hamming==12")
+
+
 if __name__ == "__main__":
     test_quickstart_removes_the_refetched_doc()
     test_distinct_content_is_never_silently_dropped()
@@ -204,4 +381,9 @@ if __name__ == "__main__":
     test_keep_longest_respects_the_documented_contract()
     test_unicode_and_pathological_input()
     test_symbol_only_items_are_not_all_collapsed()
-    print(chr(10) + "ALL 9 TESTS PASSED")
+    test_overlap_gate_is_min_not_max_the_and_not_the_or()
+    test_jaccard_both_empty_sets_are_identical_by_contract()
+    test_keep_longest_tiebreak_prefers_earliest_on_length_tie()
+    test_simhash_bit_polarity_strict_positive_not_non_negative()
+    test_clustering_candidate_gate_boundary_hamming_equals_max_hamming()
+    print(chr(10) + "ALL 14 TESTS PASSED")
